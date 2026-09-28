@@ -52,7 +52,7 @@ jobs:
           APP_JWT_SECRET: ci-secret-key-with-32-plus-bytes
         run: pytest
 
-  integration-real-deps:
+  integration-db-redis:
     runs-on: ubuntu-latest
     services:
       postgres:

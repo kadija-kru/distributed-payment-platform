@@ -179,10 +179,10 @@ async def process_accounts_event(session: AsyncSession, event: dict) -> None:
         queue_outbox_event(session, get_settings().kafka_topic, next_event.as_dict(), payment.id)
     elif event["event_type"] == RELEASE_FUNDS_REQUESTED:
         source = await session.get(Account, payment.source_account_id)
-        new_reserved = max(Decimal("0.00"), source.reserved_balance - payment.amount)
+        new_reserved = source.reserved_balance - payment.amount
         result = await session.execute(
             update(Account)
-            .where(Account.id == source.id, Account.version == source.version)
+            .where(Account.id == source.id, Account.version == source.version, Account.reserved_balance >= payment.amount)
             .values(reserved_balance=new_reserved, version=source.version + 1)
         )
         if result.rowcount != 1:
@@ -217,10 +217,10 @@ async def process_ledger_event(session: AsyncSession, event: dict) -> None:
         raise RuntimeError("simulated ledger failure")
     source = await session.get(Account, payment.source_account_id)
     destination = await session.get(Account, payment.destination_account_id)
-    new_source_reserved = max(Decimal("0.00"), source.reserved_balance - payment.amount)
+    new_source_reserved = source.reserved_balance - payment.amount
     debit_result = await session.execute(
         update(Account)
-        .where(Account.id == source.id, Account.version == source.version)
+        .where(Account.id == source.id, Account.version == source.version, Account.reserved_balance >= payment.amount)
         .values(balance=source.balance - payment.amount, reserved_balance=new_source_reserved, version=source.version + 1)
     )
     credit_result = await session.execute(
