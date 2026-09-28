@@ -35,3 +35,28 @@ def test_idempotent_payment_happy_path(client, auth_headers):
     assert source_after['reserved_balance'] == '0.00'
     assert destination_after['balance'] == '70.00'
     assert any(entry['state_to'] == 'COMPLETED' for entry in audit)
+
+
+def test_idempotency_key_reuse_with_different_payload_is_rejected(client, auth_headers):
+    source = client.post('/accounts', json={'owner_id': 'alice', 'currency': 'USD', 'balance': '100.00'}, headers=auth_headers).json()
+    destination = client.post('/accounts', json={'owner_id': 'bob', 'currency': 'USD', 'balance': '50.00'}, headers=auth_headers).json()
+
+    headers = {**auth_headers, 'Idempotency-Key': 'pay-conflict'}
+    first = client.post('/payments', json={
+        'source_account_id': source['id'],
+        'destination_account_id': destination['id'],
+        'amount': '20.00',
+        'currency': 'USD',
+        'metadata': {},
+    }, headers=headers)
+    second = client.post('/payments', json={
+        'source_account_id': source['id'],
+        'destination_account_id': destination['id'],
+        'amount': '21.00',
+        'currency': 'USD',
+        'metadata': {},
+    }, headers=headers)
+
+    assert first.status_code == 202
+    assert second.status_code == 409
+    assert second.json()['detail'] == 'idempotency key reuse with different payload'

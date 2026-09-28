@@ -20,13 +20,7 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload)
 
 
-_configured = False
-
-
 def configure_logging(service_name: str) -> None:
-    global _configured
-    if _configured:
-        return
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter())
     root = logging.getLogger()
@@ -34,4 +28,3 @@ def configure_logging(service_name: str) -> None:
     root.addHandler(handler)
     root.setLevel(logging.INFO)
     logging.getLogger(service_name).info("logging-configured", extra={"service": service_name})
-    _configured = True

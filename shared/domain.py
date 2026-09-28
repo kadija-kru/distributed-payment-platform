@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from decimal import Decimal
 from uuid import uuid4
 
@@ -13,9 +15,11 @@ from shared.config import get_settings
 from shared.events import (
     EventEnvelope,
     FRAUD_APPROVED,
+    FRAUD_CHECK_REQUESTED,
     FRAUD_REJECTED,
     FUNDS_RELEASED,
     FUNDS_RESERVED,
+    LEDGER_POST_REQUESTED,
     LEDGER_POSTED,
     PAYMENT_COMPLETED,
     PAYMENT_CREATED,
@@ -24,6 +28,11 @@ from shared.events import (
 )
 from shared.models import Account, AuditLog, LedgerEntry, Payment, PaymentState
 from shared.schemas import AccountCreate, PaymentCreate
+
+
+def payment_fingerprint(request: PaymentCreate) -> str:
+    canonical = json.dumps(request.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def serialize_payment(payment: Payment) -> dict:
@@ -84,8 +93,11 @@ async def invalidate_account_cache(account_id: str) -> None:
 
 
 async def create_payment(session: AsyncSession, request: PaymentCreate, idempotency_key: str, correlation_id: str) -> Payment:
+    fingerprint = payment_fingerprint(request)
     existing = (await session.execute(select(Payment).where(Payment.idempotency_key == idempotency_key))).scalar_one_or_none()
     if existing:
+        if existing.request_fingerprint != fingerprint:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="idempotency key reuse with different payload")
         return existing
     if request.source_account_id == request.destination_account_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="source and destination must differ")
@@ -102,6 +114,7 @@ async def create_payment(session: AsyncSession, request: PaymentCreate, idempote
         state=PaymentState.CREATED,
         idempotency_key=idempotency_key,
         correlation_id=correlation_id,
+        request_fingerprint=fingerprint,
         payment_metadata=request.metadata,
         version=1,
     )
@@ -162,7 +175,7 @@ async def process_accounts_event(session: AsyncSession, event: dict) -> None:
 
 
 async def process_fraud_event(session: AsyncSession, event: dict) -> None:
-    if await already_processed(session, "fraud", event) or event["event_type"] != FUNDS_RESERVED:
+    if await already_processed(session, "fraud", event) or event["event_type"] != FRAUD_CHECK_REQUESTED:
         return
     payment = await session.get(Payment, event["payment_id"])
     if payment is None:
@@ -177,7 +190,7 @@ async def process_fraud_event(session: AsyncSession, event: dict) -> None:
 
 
 async def process_ledger_event(session: AsyncSession, event: dict) -> None:
-    if await already_processed(session, "ledger", event) or event["event_type"] != FRAUD_APPROVED:
+    if await already_processed(session, "ledger", event) or event["event_type"] != LEDGER_POST_REQUESTED:
         return
     payment = await session.get(Payment, event["payment_id"])
     if payment is None:
@@ -210,8 +223,12 @@ async def process_payment_event(session: AsyncSession, event: dict) -> None:
         return
     if event["event_type"] == FUNDS_RESERVED:
         await transition_payment(session, payment.id, PaymentState.CREATED, PaymentState.FUNDS_RESERVED, payment.correlation_id, event)
+        fraud_check = EventEnvelope(FRAUD_CHECK_REQUESTED, payment.id, payment.correlation_id, {"payment_id": payment.id})
+        queue_outbox_event(session, get_settings().kafka_topic, fraud_check.as_dict(), payment.id)
     elif event["event_type"] == FRAUD_APPROVED:
         await transition_payment(session, payment.id, PaymentState.FUNDS_RESERVED, PaymentState.FRAUD_APPROVED, payment.correlation_id, event)
+        ledger_request = EventEnvelope(LEDGER_POST_REQUESTED, payment.id, payment.correlation_id, {"payment_id": payment.id})
+        queue_outbox_event(session, get_settings().kafka_topic, ledger_request.as_dict(), payment.id)
     elif event["event_type"] == FRAUD_REJECTED:
         await transition_payment(session, payment.id, PaymentState.FUNDS_RESERVED, PaymentState.FRAUD_REJECTED, payment.correlation_id, event, failure_reason="fraud rejected")
         release_event = EventEnvelope(RELEASE_FUNDS_REQUESTED, payment.id, payment.correlation_id, {"payment_id": payment.id})

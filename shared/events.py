@@ -7,10 +7,12 @@ from uuid import uuid4
 
 PAYMENT_CREATED = "payment.created"
 FUNDS_RESERVED = "payment.funds_reserved"
+FRAUD_CHECK_REQUESTED = "payment.fraud_check_requested"
 FRAUD_APPROVED = "payment.fraud_approved"
 FRAUD_REJECTED = "payment.fraud_rejected"
 RELEASE_FUNDS_REQUESTED = "payment.release_funds_requested"
 FUNDS_RELEASED = "payment.funds_released"
+LEDGER_POST_REQUESTED = "payment.ledger_post_requested"
 LEDGER_POSTED = "payment.ledger_posted"
 PAYMENT_COMPLETED = "payment.completed"
 PAYMENT_FAILED = "payment.failed"

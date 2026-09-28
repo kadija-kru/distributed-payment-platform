@@ -2,6 +2,7 @@ import asyncio
 
 from sqlalchemy import func, select
 
+from shared.config import get_settings
 from tests.conftest import drain_events
 
 
@@ -81,5 +82,6 @@ def test_ledger_failure_retries_and_hits_dlq(client, auth_headers):
 
     assert payment['state'] == 'FRAUD_APPROVED'
     assert dlq
-    assert dlq[-1]['event_type'] == 'payment.fraud_approved'
+    assert dlq[-1]['event_type'] == 'payment.ledger_post_requested'
+    assert dlq[-1]['attempt'] == get_settings().max_event_retries
     assert 'simulated ledger failure' in dlq[-1]['error']

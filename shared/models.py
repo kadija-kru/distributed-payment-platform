@@ -48,6 +48,7 @@ class Payment(Base):
     state: Mapped[PaymentState] = mapped_column(SqlEnum(PaymentState), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
     correlation_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     payment_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)

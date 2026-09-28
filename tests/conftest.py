@@ -66,7 +66,19 @@ async def drain_events(max_cycles: int = 30):
         process_payment_event,
     )
 
-    handlers = [process_accounts_event, process_payment_event, process_fraud_event, process_ledger_event, process_notification_event]
+    handler_map = {
+        'payment.created': [process_accounts_event],
+        'payment.funds_reserved': [process_payment_event],
+        'payment.fraud_check_requested': [process_fraud_event],
+        'payment.fraud_approved': [process_payment_event],
+        'payment.fraud_rejected': [process_payment_event],
+        'payment.release_funds_requested': [process_accounts_event],
+        'payment.funds_released': [process_payment_event],
+        'payment.ledger_post_requested': [process_ledger_event],
+        'payment.ledger_posted': [process_payment_event],
+        'payment.completed': [process_notification_event],
+        'payment.failed': [process_notification_event],
+    }
     settings = get_settings()
     broker = await get_broker()
     dlq = []
@@ -79,7 +91,7 @@ async def drain_events(max_cycles: int = 30):
             if topic == settings.kafka_dlq_topic:
                 dlq.append(event)
                 continue
-            for handler in handlers:
+            for handler in handler_map.get(event['event_type'], []):
                 try:
                     async with session_scope() as session:
                         await handler(session, event)
