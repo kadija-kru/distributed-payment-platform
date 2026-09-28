@@ -1,0 +1,37 @@
+[project]
+name = "distributed-payment-platform"
+version = "0.1.0"
+description = "Production-style distributed payment platform scaffold with FastAPI, PostgreSQL, Redis, and Kafka"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "aiokafka>=0.11.0",
+  "aiosqlite>=0.20.0",
+  "asyncpg>=0.30.0",
+  "fastapi>=0.116.0",
+  "httpx>=0.28.0",
+  "pydantic-settings>=2.10.0",
+  "pyjwt>=2.10.0",
+  "redis>=6.4.0",
+  "sqlalchemy>=2.0.43",
+  "greenlet>=3.1.0",
+  "uvicorn[standard]>=0.35.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4.0",
+  "pytest-asyncio>=1.1.0",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["gateway", "shared", "services.accounts", "services.payments", "services.fraud", "services.ledger", "services.notifications"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+

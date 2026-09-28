@@ -1,0 +1,95 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: payment_platform
+          POSTGRES_USER: payment
+          POSTGRES_PASSWORD: payment
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U payment -d payment_platform"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+      - name: Validate Docker Compose
+        run: docker compose config >/dev/null
+      - name: Run tests
+        env:
+          APP_DATABASE_URL: sqlite+aiosqlite:///./ci.db
+          APP_KAFKA_BOOTSTRAP_SERVERS: memory://
+          APP_REDIS_URL: memory://
+          APP_JWT_SECRET: ci-secret-key-with-32-plus-bytes
+        run: pytest
+
+  integration-db-redis:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: payment_platform
+          POSTGRES_USER: payment
+          POSTGRES_PASSWORD: payment
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U payment -d payment_platform"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+      - name: Run integration tests with Postgres and Redis
+        env:
+          APP_DATABASE_URL: postgresql+asyncpg://payment:payment@127.0.0.1:5432/payment_platform
+          APP_KAFKA_BOOTSTRAP_SERVERS: memory://
+          APP_REDIS_URL: redis://127.0.0.1:6379/0
+          APP_JWT_SECRET: ci-secret-key-with-32-plus-bytes
+        run: pytest
