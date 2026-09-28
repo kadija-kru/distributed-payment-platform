@@ -222,23 +222,48 @@ async def process_payment_event(session: AsyncSession, event: dict) -> None:
     if payment is None:
         return
     if event["event_type"] == FUNDS_RESERVED:
+        if payment.state != PaymentState.CREATED:
+            if payment.state in {PaymentState.FUNDS_RESERVED, PaymentState.FRAUD_APPROVED, PaymentState.LEDGER_POSTED, PaymentState.COMPLETED}:
+                await mark_processed(session, "payments", event)
+                return
+            raise ValueError(f"invalid transition {payment.state.value} -> {PaymentState.FUNDS_RESERVED.value}")
         await transition_payment(session, payment.id, PaymentState.CREATED, PaymentState.FUNDS_RESERVED, payment.correlation_id, event)
         fraud_check = EventEnvelope(FRAUD_CHECK_REQUESTED, payment.id, payment.correlation_id, {"payment_id": payment.id})
         queue_outbox_event(session, get_settings().kafka_topic, fraud_check.as_dict(), payment.id)
     elif event["event_type"] == FRAUD_APPROVED:
+        if payment.state != PaymentState.FUNDS_RESERVED:
+            if payment.state in {PaymentState.FRAUD_APPROVED, PaymentState.LEDGER_POSTED, PaymentState.COMPLETED}:
+                await mark_processed(session, "payments", event)
+                return
+            raise ValueError(f"invalid transition {payment.state.value} -> {PaymentState.FRAUD_APPROVED.value}")
         await transition_payment(session, payment.id, PaymentState.FUNDS_RESERVED, PaymentState.FRAUD_APPROVED, payment.correlation_id, event)
         ledger_request = EventEnvelope(LEDGER_POST_REQUESTED, payment.id, payment.correlation_id, {"payment_id": payment.id})
         queue_outbox_event(session, get_settings().kafka_topic, ledger_request.as_dict(), payment.id)
     elif event["event_type"] == FRAUD_REJECTED:
+        if payment.state != PaymentState.FUNDS_RESERVED:
+            if payment.state in {PaymentState.FRAUD_REJECTED, PaymentState.FUNDS_RELEASED, PaymentState.FAILED}:
+                await mark_processed(session, "payments", event)
+                return
+            raise ValueError(f"invalid transition {payment.state.value} -> {PaymentState.FRAUD_REJECTED.value}")
         await transition_payment(session, payment.id, PaymentState.FUNDS_RESERVED, PaymentState.FRAUD_REJECTED, payment.correlation_id, event, failure_reason="fraud rejected")
         release_event = EventEnvelope(RELEASE_FUNDS_REQUESTED, payment.id, payment.correlation_id, {"payment_id": payment.id})
         queue_outbox_event(session, get_settings().kafka_topic, release_event.as_dict(), payment.id)
     elif event["event_type"] == LEDGER_POSTED:
+        if payment.state != PaymentState.FRAUD_APPROVED:
+            if payment.state in {PaymentState.LEDGER_POSTED, PaymentState.COMPLETED}:
+                await mark_processed(session, "payments", event)
+                return
+            raise ValueError(f"invalid transition {payment.state.value} -> {PaymentState.LEDGER_POSTED.value}")
         await transition_payment(session, payment.id, PaymentState.FRAUD_APPROVED, PaymentState.LEDGER_POSTED, payment.correlation_id, event)
         await transition_payment(session, payment.id, PaymentState.LEDGER_POSTED, PaymentState.COMPLETED, payment.correlation_id, event)
         completed = EventEnvelope(PAYMENT_COMPLETED, payment.id, payment.correlation_id, {"payment_id": payment.id})
         queue_outbox_event(session, get_settings().kafka_topic, completed.as_dict(), payment.id)
     elif event["event_type"] == FUNDS_RELEASED:
+        if payment.state != PaymentState.FRAUD_REJECTED:
+            if payment.state in {PaymentState.FUNDS_RELEASED, PaymentState.FAILED}:
+                await mark_processed(session, "payments", event)
+                return
+            raise ValueError(f"invalid transition {payment.state.value} -> {PaymentState.FUNDS_RELEASED.value}")
         await transition_payment(session, payment.id, PaymentState.FRAUD_REJECTED, PaymentState.FUNDS_RELEASED, payment.correlation_id, event, failure_reason="fraud rejected")
         await transition_payment(session, payment.id, PaymentState.FUNDS_RELEASED, PaymentState.FAILED, payment.correlation_id, event, failure_reason="fraud rejected")
         failed = EventEnvelope(PAYMENT_FAILED, payment.id, payment.correlation_id, {"payment_id": payment.id})

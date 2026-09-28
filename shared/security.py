@@ -17,7 +17,7 @@ def issue_token(username: str, password: str) -> str:
     now = datetime.now(UTC)
     settings = get_settings()
     return jwt.encode(
-        {"sub": user["subject"], "preferred_username": username, "iat": now, "exp": now + timedelta(hours=12)},
+        {"sub": user["subject"], "preferred_username": username, "iss": settings.jwt_issuer, "aud": settings.jwt_audience, "iat": now, "exp": now + timedelta(hours=12)},
         settings.jwt_secret,
         algorithm=settings.jwt_algorithm,
     )
@@ -29,7 +29,7 @@ async def require_auth(authorization: str = Header(default="")) -> dict[str, str
     token = authorization.removeprefix("Bearer ").strip()
     settings = get_settings()
     try:
-        payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+        payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm], issuer=settings.jwt_issuer, audience=settings.jwt_audience)
     except jwt.PyJWTError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token") from exc
     return {"sub": payload["sub"], "username": payload.get("preferred_username", "unknown")}

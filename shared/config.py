@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     kafka_dlq_topic: str = "payment-events-dlq"
     jwt_secret: str = "change-me"
     jwt_algorithm: str = "HS256"
+    jwt_issuer: str = "distributed-payment-platform"
+    jwt_audience: str = "payment-platform-api"
     rate_limit_per_minute: int = 60
     fraud_reject_above: int = 10000
     max_event_retries: int = 3

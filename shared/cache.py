@@ -63,9 +63,10 @@ class RedisCache:
         await self.client.delete(key)
 
     async def incr(self, key: str, ttl_seconds: int) -> int:
-        value = await self.client.incr(key)
-        if value == 1:
-            await self.client.expire(key, ttl_seconds)
+        async with self.client.pipeline(transaction=True) as pipe:
+            pipe.incr(key)
+            pipe.expire(key, ttl_seconds, nx=True)
+            value, _ = await pipe.execute()
         return int(value)
 
 

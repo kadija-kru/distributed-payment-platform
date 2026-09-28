@@ -92,7 +92,7 @@ async def get_payment_endpoint(payment_id: str, user=Depends(require_auth)) -> P
 async def get_payment_audit(payment_id: str, user=Depends(require_auth)):
     await enforce_rate_limit(user["sub"])
     async with session_scope() as session:
-        rows = list((await session.execute(select(AuditLog).where(AuditLog.aggregate_id == payment_id).order_by(AuditLog.created_at))).scalars())
+        rows = list((await session.execute(select(AuditLog).where(AuditLog.aggregate_type == "payment", AuditLog.aggregate_id == payment_id).order_by(AuditLog.created_at))).scalars())
         return [{"action": row.action, "state_from": row.state_from, "state_to": row.state_to, "payload": row.payload} for row in rows]
 
 
@@ -102,5 +102,5 @@ async def health():
 
 
 @app.get("/metrics", response_class=PlainTextResponse)
-async def metrics() -> str:
+async def metrics(user=Depends(require_auth)) -> str:
     return render_metrics()
