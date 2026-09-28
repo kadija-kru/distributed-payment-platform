@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException, status
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.broker import claim_event, queue_outbox_event
@@ -120,7 +121,14 @@ async def create_payment(session: AsyncSession, request: PaymentCreate, idempote
         version=1,
     )
     session.add(payment)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError:
+        await session.rollback()
+        existing = (await session.execute(select(Payment).where(Payment.subject == subject, Payment.idempotency_key == idempotency_key))).scalar_one()
+        if existing.request_fingerprint != fingerprint:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="idempotency key reuse with different payload")
+        return existing
     await add_audit(session, "payment", payment.id, PAYMENT_CREATED, correlation_id, None, PaymentState.CREATED.value, request.metadata)
     event = EventEnvelope(PAYMENT_CREATED, payment.id, correlation_id, {**request.model_dump(mode="json"), "payment_id": payment.id})
     queue_outbox_event(session, get_settings().kafka_topic, event.as_dict(), payment.id)
@@ -158,16 +166,27 @@ async def process_accounts_event(session: AsyncSession, event: dict) -> None:
         source = await session.get(Account, payment.source_account_id)
         if source.balance - source.reserved_balance < payment.amount:
             raise ValueError("insufficient funds")
-        source.reserved_balance += payment.amount
-        source.version += 1
+        result = await session.execute(
+            update(Account)
+            .where(Account.id == source.id, Account.version == source.version, Account.balance - Account.reserved_balance >= payment.amount)
+            .values(reserved_balance=source.reserved_balance + payment.amount, version=source.version + 1)
+        )
+        if result.rowcount != 1:
+            raise ValueError("account concurrency conflict")
         await invalidate_account_cache(source.id)
         await add_audit(session, "account", source.id, "funds.reserved", payment.correlation_id, None, None, {"payment_id": payment.id, "amount": str(payment.amount)})
         next_event = EventEnvelope(FUNDS_RESERVED, payment.id, payment.correlation_id, {"payment_id": payment.id})
         queue_outbox_event(session, get_settings().kafka_topic, next_event.as_dict(), payment.id)
     elif event["event_type"] == RELEASE_FUNDS_REQUESTED:
         source = await session.get(Account, payment.source_account_id)
-        source.reserved_balance = max(Decimal("0.00"), source.reserved_balance - payment.amount)
-        source.version += 1
+        new_reserved = max(Decimal("0.00"), source.reserved_balance - payment.amount)
+        result = await session.execute(
+            update(Account)
+            .where(Account.id == source.id, Account.version == source.version)
+            .values(reserved_balance=new_reserved, version=source.version + 1)
+        )
+        if result.rowcount != 1:
+            raise ValueError("account concurrency conflict")
         await invalidate_account_cache(source.id)
         await add_audit(session, "account", source.id, "funds.released", payment.correlation_id, None, None, {"payment_id": payment.id, "amount": str(payment.amount)})
         next_event = EventEnvelope(FUNDS_RELEASED, payment.id, payment.correlation_id, {"payment_id": payment.id})
@@ -198,11 +217,19 @@ async def process_ledger_event(session: AsyncSession, event: dict) -> None:
         raise RuntimeError("simulated ledger failure")
     source = await session.get(Account, payment.source_account_id)
     destination = await session.get(Account, payment.destination_account_id)
-    source.balance -= payment.amount
-    source.reserved_balance = max(Decimal("0.00"), source.reserved_balance - payment.amount)
-    source.version += 1
-    destination.balance += payment.amount
-    destination.version += 1
+    new_source_reserved = max(Decimal("0.00"), source.reserved_balance - payment.amount)
+    debit_result = await session.execute(
+        update(Account)
+        .where(Account.id == source.id, Account.version == source.version)
+        .values(balance=source.balance - payment.amount, reserved_balance=new_source_reserved, version=source.version + 1)
+    )
+    credit_result = await session.execute(
+        update(Account)
+        .where(Account.id == destination.id, Account.version == destination.version)
+        .values(balance=destination.balance + payment.amount, version=destination.version + 1)
+    )
+    if debit_result.rowcount != 1 or credit_result.rowcount != 1:
+        raise ValueError("ledger concurrency conflict")
     session.add_all([
         LedgerEntry(payment_id=payment.id, account_id=source.id, entry_type="DEBIT", amount=payment.amount),
         LedgerEntry(payment_id=payment.id, account_id=destination.id, entry_type="CREDIT", amount=payment.amount),

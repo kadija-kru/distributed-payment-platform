@@ -92,4 +92,4 @@ jobs:
           APP_KAFKA_BOOTSTRAP_SERVERS: memory://
           APP_REDIS_URL: redis://127.0.0.1:6379/0
           APP_JWT_SECRET: ci-secret-key-with-32-plus-bytes
-        run: pytest tests/integration tests/failure
+        run: pytest
