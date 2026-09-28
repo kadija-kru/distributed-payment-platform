@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from shared.config import get_settings
 from shared.db import session_scope
@@ -77,15 +78,14 @@ async def outbox_publisher(stop_event: asyncio.Event) -> None:
             continue
 
 
-async def already_processed(session, service_name: str, event: dict) -> bool:
-    existing = await session.execute(
-        select(ProcessedEvent).where(ProcessedEvent.event_id == event["event_id"], ProcessedEvent.service_name == service_name)
-    )
-    return existing.scalar_one_or_none() is not None
-
-
-async def mark_processed(session, service_name: str, event: dict) -> None:
-    session.add(ProcessedEvent(event_id=event["event_id"], service_name=service_name, event_type=event["event_type"]))
+async def claim_event(session, service_name: str, event: dict) -> bool:
+    try:
+        session.add(ProcessedEvent(event_id=event["event_id"], service_name=service_name, event_type=event["event_type"]))
+        await session.flush()
+        return True
+    except IntegrityError:
+        await session.rollback()
+        return False
 
 
 @asynccontextmanager

@@ -39,14 +39,16 @@ class Account(Base):
 
 class Payment(Base):
     __tablename__ = "payments"
+    __table_args__ = (UniqueConstraint("subject", "idempotency_key", name="uq_payments_subject_idempotency"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    subject: Mapped[str] = mapped_column(String(128), nullable=False)
     source_account_id: Mapped[str] = mapped_column(ForeignKey("accounts.id"), nullable=False)
     destination_account_id: Mapped[str] = mapped_column(ForeignKey("accounts.id"), nullable=False)
     amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     state: Mapped[PaymentState] = mapped_column(SqlEnum(PaymentState), nullable=False)
-    idempotency_key: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     correlation_id: Mapped[str] = mapped_column(String(128), nullable=False)
     request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     payment_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)

@@ -67,7 +67,7 @@ async def create_payment_endpoint(payload: PaymentCreate, idempotency_key: str =
     if not idempotency_key:
         raise HTTPException(status_code=400, detail="Idempotency-Key header is required")
     async with session_scope() as session:
-        payment = await create_payment(session, payload, idempotency_key, correlation_id_var.get())
+        payment = await create_payment(session, payload, idempotency_key, correlation_id_var.get(), user["sub"])
         increment("payments_created_total")
         return PaymentResponse(**serialize_payment(payment))
 

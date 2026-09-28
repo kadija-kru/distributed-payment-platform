@@ -9,7 +9,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared.broker import already_processed, mark_processed, queue_outbox_event
+from shared.broker import claim_event, queue_outbox_event
 from shared.cache import get_cache
 from shared.config import get_settings
 from shared.events import (
@@ -92,9 +92,9 @@ async def invalidate_account_cache(account_id: str) -> None:
     await cache.delete(f"account:{account_id}")
 
 
-async def create_payment(session: AsyncSession, request: PaymentCreate, idempotency_key: str, correlation_id: str) -> Payment:
+async def create_payment(session: AsyncSession, request: PaymentCreate, idempotency_key: str, correlation_id: str, subject: str) -> Payment:
     fingerprint = payment_fingerprint(request)
-    existing = (await session.execute(select(Payment).where(Payment.idempotency_key == idempotency_key))).scalar_one_or_none()
+    existing = (await session.execute(select(Payment).where(Payment.subject == subject, Payment.idempotency_key == idempotency_key))).scalar_one_or_none()
     if existing:
         if existing.request_fingerprint != fingerprint:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="idempotency key reuse with different payload")
@@ -107,6 +107,7 @@ async def create_payment(session: AsyncSession, request: PaymentCreate, idempote
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="account not found")
     payment = Payment(
         id=str(uuid4()),
+        subject=subject,
         source_account_id=request.source_account_id,
         destination_account_id=request.destination_account_id,
         amount=request.amount,
@@ -148,7 +149,7 @@ async def transition_payment(session: AsyncSession, payment_id: str, expected_st
 
 
 async def process_accounts_event(session: AsyncSession, event: dict) -> None:
-    if await already_processed(session, "accounts", event):
+    if not await claim_event(session, "accounts", event):
         return
     payment = await session.get(Payment, event["payment_id"])
     if payment is None:
@@ -171,11 +172,10 @@ async def process_accounts_event(session: AsyncSession, event: dict) -> None:
         await add_audit(session, "account", source.id, "funds.released", payment.correlation_id, None, None, {"payment_id": payment.id, "amount": str(payment.amount)})
         next_event = EventEnvelope(FUNDS_RELEASED, payment.id, payment.correlation_id, {"payment_id": payment.id})
         queue_outbox_event(session, get_settings().kafka_topic, next_event.as_dict(), payment.id)
-    await mark_processed(session, "accounts", event)
 
 
 async def process_fraud_event(session: AsyncSession, event: dict) -> None:
-    if await already_processed(session, "fraud", event) or event["event_type"] != FRAUD_CHECK_REQUESTED:
+    if event["event_type"] != FRAUD_CHECK_REQUESTED or not await claim_event(session, "fraud", event):
         return
     payment = await session.get(Payment, event["payment_id"])
     if payment is None:
@@ -186,11 +186,10 @@ async def process_fraud_event(session: AsyncSession, event: dict) -> None:
         next_type = FRAUD_APPROVED
     next_event = EventEnvelope(next_type, payment.id, payment.correlation_id, {"payment_id": payment.id})
     queue_outbox_event(session, get_settings().kafka_topic, next_event.as_dict(), payment.id)
-    await mark_processed(session, "fraud", event)
 
 
 async def process_ledger_event(session: AsyncSession, event: dict) -> None:
-    if await already_processed(session, "ledger", event) or event["event_type"] != LEDGER_POST_REQUESTED:
+    if event["event_type"] != LEDGER_POST_REQUESTED or not await claim_event(session, "ledger", event):
         return
     payment = await session.get(Payment, event["payment_id"])
     if payment is None:
@@ -212,11 +211,10 @@ async def process_ledger_event(session: AsyncSession, event: dict) -> None:
     await invalidate_account_cache(destination.id)
     next_event = EventEnvelope(LEDGER_POSTED, payment.id, payment.correlation_id, {"payment_id": payment.id})
     queue_outbox_event(session, get_settings().kafka_topic, next_event.as_dict(), payment.id)
-    await mark_processed(session, "ledger", event)
 
 
 async def process_payment_event(session: AsyncSession, event: dict) -> None:
-    if await already_processed(session, "payments", event):
+    if not await claim_event(session, "payments", event):
         return
     payment = await session.get(Payment, event["payment_id"])
     if payment is None:
@@ -224,7 +222,6 @@ async def process_payment_event(session: AsyncSession, event: dict) -> None:
     if event["event_type"] == FUNDS_RESERVED:
         if payment.state != PaymentState.CREATED:
             if payment.state in {PaymentState.FUNDS_RESERVED, PaymentState.FRAUD_APPROVED, PaymentState.LEDGER_POSTED, PaymentState.COMPLETED}:
-                await mark_processed(session, "payments", event)
                 return
             raise ValueError(f"invalid transition {payment.state.value} -> {PaymentState.FUNDS_RESERVED.value}")
         await transition_payment(session, payment.id, PaymentState.CREATED, PaymentState.FUNDS_RESERVED, payment.correlation_id, event)
@@ -233,7 +230,6 @@ async def process_payment_event(session: AsyncSession, event: dict) -> None:
     elif event["event_type"] == FRAUD_APPROVED:
         if payment.state != PaymentState.FUNDS_RESERVED:
             if payment.state in {PaymentState.FRAUD_APPROVED, PaymentState.LEDGER_POSTED, PaymentState.COMPLETED}:
-                await mark_processed(session, "payments", event)
                 return
             raise ValueError(f"invalid transition {payment.state.value} -> {PaymentState.FRAUD_APPROVED.value}")
         await transition_payment(session, payment.id, PaymentState.FUNDS_RESERVED, PaymentState.FRAUD_APPROVED, payment.correlation_id, event)
@@ -242,7 +238,6 @@ async def process_payment_event(session: AsyncSession, event: dict) -> None:
     elif event["event_type"] == FRAUD_REJECTED:
         if payment.state != PaymentState.FUNDS_RESERVED:
             if payment.state in {PaymentState.FRAUD_REJECTED, PaymentState.FUNDS_RELEASED, PaymentState.FAILED}:
-                await mark_processed(session, "payments", event)
                 return
             raise ValueError(f"invalid transition {payment.state.value} -> {PaymentState.FRAUD_REJECTED.value}")
         await transition_payment(session, payment.id, PaymentState.FUNDS_RESERVED, PaymentState.FRAUD_REJECTED, payment.correlation_id, event, failure_reason="fraud rejected")
@@ -251,7 +246,6 @@ async def process_payment_event(session: AsyncSession, event: dict) -> None:
     elif event["event_type"] == LEDGER_POSTED:
         if payment.state != PaymentState.FRAUD_APPROVED:
             if payment.state in {PaymentState.LEDGER_POSTED, PaymentState.COMPLETED}:
-                await mark_processed(session, "payments", event)
                 return
             raise ValueError(f"invalid transition {payment.state.value} -> {PaymentState.LEDGER_POSTED.value}")
         await transition_payment(session, payment.id, PaymentState.FRAUD_APPROVED, PaymentState.LEDGER_POSTED, payment.correlation_id, event)
@@ -261,19 +255,16 @@ async def process_payment_event(session: AsyncSession, event: dict) -> None:
     elif event["event_type"] == FUNDS_RELEASED:
         if payment.state != PaymentState.FRAUD_REJECTED:
             if payment.state in {PaymentState.FUNDS_RELEASED, PaymentState.FAILED}:
-                await mark_processed(session, "payments", event)
                 return
             raise ValueError(f"invalid transition {payment.state.value} -> {PaymentState.FUNDS_RELEASED.value}")
         await transition_payment(session, payment.id, PaymentState.FRAUD_REJECTED, PaymentState.FUNDS_RELEASED, payment.correlation_id, event, failure_reason="fraud rejected")
         await transition_payment(session, payment.id, PaymentState.FUNDS_RELEASED, PaymentState.FAILED, payment.correlation_id, event, failure_reason="fraud rejected")
         failed = EventEnvelope(PAYMENT_FAILED, payment.id, payment.correlation_id, {"payment_id": payment.id})
         queue_outbox_event(session, get_settings().kafka_topic, failed.as_dict(), payment.id)
-    await mark_processed(session, "payments", event)
 
 
 async def process_notification_event(session: AsyncSession, event: dict) -> None:
-    if await already_processed(session, "notifications", event):
+    if not await claim_event(session, "notifications", event):
         return
     if event["event_type"] in {PAYMENT_COMPLETED, PAYMENT_FAILED}:
         await add_audit(session, "notification", event["payment_id"], event["event_type"], event["correlation_id"], None, None, event)
-    await mark_processed(session, "notifications", event)
